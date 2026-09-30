@@ -1,0 +1,143 @@
+name: scaler-backend
+
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: scaler-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: scaler-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: scaler-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: scaler-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      # Other containers on this network reach Kafka at kafka:9092; anything
+      # running on the host machine (e.g. a local test script) uses
+      # localhost:29092 instead.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  service-discovery:
+    build: ./service-discovery
+    container_name: scaler-service-discovery
+    restart: unless-stopped
+    ports:
+      - "8761:8761"
+
+  user-authentication-service:
+    build: ./user-authentication-service
+    container_name: scaler-user-authentication-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      service-discovery:
+        condition: service_started
+      kafka:
+        condition: service_started
+    environment:
+      SERVER_PORT: 8081
+      DB_HOST: mysql
+      DB_USERNAME: root
+      DB_PASSWORD: root
+      EUREKA_URI: http://service-discovery:8761/eureka/
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # ":-" (not ":") so an unset *or* empty host variable both fall back to
+      # this value - an empty JWT secret would otherwise reach the container
+      # and crash the service at startup when it tries to build a signing key.
+      JWT_SECRET: ${JWT_SECRET:-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08e8f6c0a1b2d3e4f5061728394a5b6c7d}
+    ports:
+      - "8081:8081"
+
+  notification-service:
+    build: ./notification-service
+    container_name: scaler-notification-service
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_APP_PASSWORD: ${MAIL_APP_PASSWORD:-}
+
+  product-catalog-service:
+    build: ./product-catalog-service
+    container_name: scaler-product-catalog-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      service-discovery:
+        condition: service_started
+    environment:
+      SERVER_PORT: 8082
+      DB_HOST: mysql
+      DB_USERNAME: root
+      DB_PASSWORD: root
+      REDIS_HOST: redis
+      EUREKA_URI: http://service-discovery:8761/eureka/
+    ports:
+      - "8082:8082"
+
+  payment-service:
+    build: ./payment-service
+    container_name: scaler-payment-service
+    restart: unless-stopped
+    depends_on:
+      - service-discovery
+    environment:
+      SERVER_PORT: 8083
+      EUREKA_URI: http://service-discovery:8761/eureka/
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+    ports:
+      - "8083:8083"
+
+  docker-demo:
+    build: ./docker-demo
+    container_name: scaler-docker-demo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+
+volumes:
+  mysql-data:
